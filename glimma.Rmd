@@ -1,0 +1,18 @@
+---
+title: "Digging into Glimma2"
+output: html_notebook
+---
+We are going to learn more about Glimma2.
+we will follow the "Introduction using limma or edgeR" doc found at browseVignettes("Glimma").
+
+>> first do rnaseq123: https://bioconductor.org/packages/release/workflows/html/RNAseq123.html
+https://bioconductor.org/packages/release/workflows/vignettes/RNAseq123/inst/doc/limmaWorkflow.R
+
+```{r}
+library(Glimma)
+library(limma)
+library(edgeR)
+```
+
+
+
