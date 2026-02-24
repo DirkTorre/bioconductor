@@ -1,0 +1,742 @@
+---
+title: "RNAseq123"
+output: html_notebook
+---
+
+Goal: to recap RNA-seq analysis.
+
+
+
+code: https://bioconductor.org/packages/release/workflows/vignettes/RNAseq123/inst/doc/limmaWorkflow.R
+article: https://f1000research.com/articles/5-1408/v3
+
+
+about the data:
+
+data comes from: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE63310
+
+
+
+Workflow is from Sheridan et al. (2015).
+this?: https://pubmed.ncbi.nlm.nih.gov/26080807/
+or this?: https://pubmed.ncbi.nlm.nih.gov/25879659/
+
+3 cell populations in triplicate:
+- **Mammary stem cells (MaSC/basal)** — the “mother” cells that can create all other mammary cell types.  
+- **Luminal progenitor cells (LP)** — cells partway along the developmental path; they can still divide and specialize.  
+- **Mature luminal cells (ML)** — fully specialized cells that line the ducts and help produce milk.
+
+data:
+- 100 base-pair single-end reads, aquired by Illumina HiSeq 2000.
+- count data: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE63310
+- mouse reference genome (mm10)
+
+
+
+
+# Let's start the excercise!
+
+```{r}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("limma")
+# BiocManager::install("Glimma") # installs edger, tidyr, dplyr etc
+# BiocManager::install("gridextra")
+# BiocManager::install("Mus.musculus")
+# install.packages("patchwork")
+# install.packages("gplots")
+```
+
+
+maybe redo the whole tutorial
+
+```{r}
+library(limma)
+library(Glimma)
+library(edgeR)
+library(tidyr) # for reshaping data
+library(dplyr) # other data manipulation
+library(Mus.musculus)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(RColorBrewer)
+```
+# Data packaging
+
+## Reading in count data
+
+Download and extract count data.
+Important: there are two files that are not used: 
+  - "GSM1545537_mo906111-1_m09611-2.txt"
+  - "GSM1545543_JMS9-CDBG.txt"
+
+
+todo: check if files are already there
+
+```{r}
+# download
+url <- "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE63310&format=file"
+utils::download.file(url, destfile="data/GSE63310_RAW.tar", mode="wb")
+utils::untar("data/GSE63310_RAW.tar", exdir = "data/")
+
+# # extract
+# # files <- c("GSM1545535_10_6_5_11.txt", "GSM1545536_9_6_5_11.txt", "GSM1545538_purep53.txt",
+# #   "GSM1545539_JMS8-2.txt", "GSM1545540_JMS8-3.txt", "GSM1545541_JMS8-4.txt",
+# #   "GSM1545542_JMS8-5.txt", "GSM1545544_JMS9-P7c.txt", "GSM1545545_JMS9-P8c.txt",
+# #   "GSM1545537_mo906111-1_m09611-2.txt", "GSM1545543_JMS9-CDBG.txt")
+# 
+files <- c("GSM1545535_10_6_5_11.txt", "GSM1545536_9_6_5_11.txt", "GSM1545538_purep53.txt",
+  "GSM1545539_JMS8-2.txt", "GSM1545540_JMS8-3.txt", "GSM1545541_JMS8-4.txt",
+  "GSM1545542_JMS8-5.txt", "GSM1545544_JMS9-P7c.txt", "GSM1545545_JMS9-P8c.txt")
+
+for(i in paste("data/", files, ".gz", sep=""))
+  R.utils::gunzip(i, overwrite=TRUE)
+
+```
+
+Look at first file in array.
+I put in a duplicate of the files variable, in case the files were already downloaded and extracted.
+```{r}
+files <- c("GSM1545535_10_6_5_11.txt", "GSM1545536_9_6_5_11.txt", "GSM1545538_purep53.txt",
+  "GSM1545539_JMS8-2.txt", "GSM1545540_JMS8-3.txt", "GSM1545541_JMS8-4.txt",
+  "GSM1545542_JMS8-5.txt", "GSM1545544_JMS9-P7c.txt", "GSM1545545_JMS9-P8c.txt")
+
+read.delim(paste("data/",files[1],sep=""), nrow=5)
+```
+
+We can lead all the count files in 1 go using edgeR!
+
+I made a mistake and didn't tell readDGE to select specific columns.
+This resulted in equal lib siszes.
+if readDGE takes in a file, it just takes the first two columns.
+So it only needs files and libsizes of the files.
+
+If you look at the help page of readDGE, by default it uses file names as the label of a sample.
+Following the help file, it needs 2 data columns: gene names, and counts.
+So the two columns needed are EntrezID and Count.
+if it takes geneLength
+
+3634
+wikipedia
+https://en.wikipedia.org/wiki/Library_(biology)
+library = library is a collection of DNA fragments that is stored and propagated in a population of micro-organisms through the process of molecular cloning
+
+question: is library size the amount of sequences, or the total amount of nucleotides?
+answer: the amount of molecules (as in: read sequences)
+https://en.wikipedia.org/wiki/RNA-Seq
+"Sequencing depth is sometimes referred to as library size, the number of intermediary cDNA molecules in the experiment."
+Note: Sequencing depth == library size (2 words for the same thing)
+
+
+```{r}
+x <- readDGE(files=files, path="data/", columns=c(1,3))
+x
+```
+
+## Organsing sample information
+
+For simplicity, we remove the GEO sample IDs (GSM*) from the column names of our DGEList-object x.
+The example states that we need to state the length of the string, but this is not needed.
+```{r}
+samplenames <- substring(colnames(x), 12)
+samplenames
+```
+
+```{r}
+x$samples
+```
+we give them the proper names.
+We also add lane information.
+```{r}
+colnames(x) <- samplenames
+group <- as.factor(c("LP", "ML", "Basal", "Basal", "ML", "LP", "Basal", "ML", "LP"))
+x$samples$group <- group
+lane <- as.factor(rep(c("L004","L006","L008"), c(3,4,2)))
+x$samples$lane <- lane
+x$samples
+```
+## Organising gene annotations
+We are ging to store gene-level information about the counts into the DGElist-object.
+the rownames of our DGElist-object contain Entrez gene-id's.
+We will use those to collect data from biomaRt about the symbol of the gene and the chromosome on which the gene is on.
+```{r}
+library(Mus.musculus)
+geneid <- rownames(x)
+genes <- select(Mus.musculus, keys=geneid, columns=c("SYMBOL","TXCHROM"), keytype="ENTREZID")
+dim(genes)
+head(genes)
+```
+
+There are duplicate ID's, let's take a look.
+```{r}
+arrange(genes[duplicated(genes$ENTREZID),],ENTREZID)
+```
+let's do a check
+```{r}
+genes[genes$ENTREZID=="100042555",]
+```
+As we can see they have different instances.
+For simplicity, we are going to take the first occurrence.
+Not the best method, but it doesn't matter for learning purposes.
+```{r}
+genes <- genes[!duplicated(genes$ENTREZID),]
+x$genes <- genes
+```
+
+Keep in mind that x$genes is ordered the same as the other data, because we only took the first onthology by using duplicated().
+if this is not the case, you can use the matchfunction to order correctly.
+
+what we do:
+1) Data pre-processing:
+  - transforming from the raw-scale
+  - Removing genes that are lowly expressed
+  - Normalising gene expression distributions
+
+# Data pre-processing
+
+## transforming from the raw-scale
+
+Ways to deal with library size differences:
+- counts per million (cpm)
+- log2-cpm
+- reads per kilobase of transcript per million (RPKM)
+- fragments per kilobase of transcripts per million (FPKM)
+
+edgeR can calculate cpm and RPKM, we will use cpm.
+It just takes the count, divides it by the library size and multiplies the answer with 10^6.
+
+LCPM will be used for exploratory plots.
+```{r}
+cpm <- cpm(x)
+lcpm <- cpm(x, log=TRUE)
+head(cpm)
+```
+I'm very curious if it takes the library size into account automatically.
+let's test it.
+```{r}
+backup = x$samples[1,"lib.size"]
+```
+
+```{r}
+x$samples[1,"lib.size"] = 32132132
+test <- cpm(x)
+head(test)
+head(cpm)
+x$samples[1,"lib.size"] = backup
+```
+It takes library size into account!
+Not much of a suprise, but good to see confirmation.
+```{r}
+x$samples
+```
+The lib size of 10_6_5_11 is: 32.863.052.
+So 1 cpm for a gene is equal to 32.8 counted reads.
+
+log-cpm are used for exploration of the data.
+log transform scales down extreme values, while leaving smaller values more the same (relatively speaking).
+lcpm() uses 2log by default, wich is handy.
+lcpm() doesn't take the 2log of 0, which is undefined, which is nice.
+
+In the example the look at the mean and median of the library sizes as cpm,so we divide by 10^6.
+a count of zero translates to -4.51 in this dataset (see tutorial).
+```{r}
+L <- mean(x$samples$lib.size) / 10^6
+M <- median(x$samples$lib.size) * 1e-6
+c(L, M)
+```
+
+```{r}
+summary(lcpm)
+```
+Keep in mind that negative lcpm are just cpm, smaller than 1.
+
+note: voom (from limma) uses log-cpm, although voom recomputes its own log-CPM values internally with a smaller prior count.
+
+## Removing genes that are lowly expressed
+
+x$counts==0 : get a true for every gene that has no counts regardless of sample.
+rowSums(x$counts==0) : sums the rows (it sums the TRUE values (so the 1's)).
+rowSums(x$counts==0)==9 :  gives a true for 9 trues in a row, so a true for every column/sample. In other words there are no counts for this gene in any of the samples.
+table(rowSums(x$counts==0)==9) : count rows without any value and with a value.
+```{r}
+table(rowSums(x$counts==0)==9)
+```
+```{r}
+table(rowSums(x$counts==0)==9)["TRUE"] / (table(rowSums(x$counts==0)==9)["FALSE"] + table(rowSums(x$counts==0)==9)["TRUE"]) * 100
+```
+19% of the genes have no counts in all samples.
+
+The figure in the example states that there are a low of low expressed genes.
+I'm going to try plotting that graph from scratch, no hand-holding.
+The local minimum is at about 0, but i'm too lazy to figure that one out, so...
+```{r}
+melted <- data.frame(lcpm) %>% gather()
+names(melted) = c("sample","lcpm")
+plot.bf <- ggplot(data=melted, aes(x=lcpm, color=sample, )) + 
+  geom_density() + 
+  labs(title="Density plot of lcpm before filtering") +
+  geom_vline(xintercept=0.2)
+plot.bf
+```
+I'ts a nicer plot with less code, this is hilarious.
+
+Automatic filtering by expression level.
+Group takes in the name of the group column from the samples datasheet.
+I'm not sure about the third argument.
+It's a DGEList object, with an label var, column var, and the third must be other options??
+A bit weird way to do it like that, oh well....
+
+IMPORTANT NOTE: - we filter on the original counts, not the logcount!
+                - keep in mind that x is now filtered.
+
+```{r}
+keep.expr <- filterByExpr(x, group=group)
+x.no_low_expr <- x[keep.expr,,keep.lib.sizes=FALSE]
+dim(x.no_low_expr)
+```
+By default it keeps genes that have at least 10 read counts.
+In reality the function calculates cpm and calculates a cut-off that correspondents to 10 read counts.
+There are 3 replicates per cell group. 
+NOTE: An biological interesting gene should be expressed in at least all replicates.
+
+The cutoff used depends on the sequencing depth and the experimental design.
+IMPORTANT:
+A larger library size gives a better resolution at lower expression levels, so then we can take a lower cpm.
+A smaller libsize gives worse resolution at lower expressed levels, so then we must take a higer cpm.
+
+we now have 16624 genes, before we had 27208.
+```{r}
+(16624 - 27208) / 27208 * 100
+```
+So a 38,9% reduction of genes.
+
+Note that subsetting the entire DGEList-object removes both the counts and the associated gene information for the filtered genes. The filtered DGEList-object keeps the gene information and the counts for the retained genes correctly associated.
+
+IMPORTANT NOTE FROM TUTORIAL: A biologically interesting gene should be expressed in at least three samples because all the cell type groups have three replicates.
+
+So always use filterByExpr().
+
+```{r}
+x
+```
+```{r}
+x.no_low_expr
+```
+
+Now we make the graph again, but first calculate lcpm again.
+```{r}
+# .nl = no low expressed genes
+cpm.nl <- cpm(x.no_low_expr)
+lcpm.nl <- cpm(x.no_low_expr, log=TRUE)
+
+melted.nl <- data.frame(lcpm.nl) %>% gather()
+names(melted.nl) = c("sample","lcpm")
+
+plot.nl <- ggplot(data=melted.nl, aes(x=lcpm, color=sample, )) + 
+  geom_density() + 
+  labs(title="Density plot of lcpm before filtering") +
+  geom_vline(xintercept=0.2)
+plot.nl
+```
+Let's put them side by side for the hell of it.
+I need to find a better package for this....
+I used to have a good one, but can't remember it's name..
+```{r}
+grid.arrange(plot.nl, plot.bf, ncol=2)
+```
+## Normalising gene expression distributions
+
+It can be that an sample has an overal higher expression than another one.
+This can occur due to external factors, which gives a skewed result for the samples.
+"It is assumed that all samples should have a similar range and distribution of expression values."
+so we arew going to normalize the gene expression <b>distribution</b> across samples.
+
+You can see in the previous plots that the distributions are close to being the same (all the lines moslty overlap).
+So it isn't really needed, but we do it anyway, for learning sake.
+The normalisation we will use is trimmed mean of M-values (TMM).
+
+Oeh! This is handy: an explenation of all gene expression units:
+https://www.reneshbedre.com/blog/expression_units.html#:~:text=TMM%20%28Trimmed%20Mean%20of%20M-values%29%20Permalink.%20TMM%20is,most%20of%20the%20genes%20are%20not%20differentially%20expressed.
+
+- TMM is a between-sample normalization method in contrast to within-sample normalization methods (RPM, RPKM/FPKM, or TPM)
+- TMM normalization method assumes that most of the genes are not differentially expressed
+- TMM normalize the total RNA output among the samples and does not consider gene length or library size for normalization (NOTE: so great with cpm(?)).
+- TMM considers sample RNA population and effective in normalization of samples with diverse RNA repertoires (e.g. samples from different tissues). TMM will be good choice to remove the batch effects while comparing the samples from different tissues or genotypes or in cases where RNA population would be significantly different among the samples.
+- TMM is implemented in edgeR and performs better for between-samples comparisons
+- edgeR does not consider gene length for normalization as it assumes that the gene length would be constant between the samples
+- to calculate:
+  M = log 2 fold change between two samples
+  M = log2(treated sample count / control sample count)
+  A = absolute expression count
+  A = (log2(treated sample count) + log2(control sample count)) / 2
+  double trimm the lower and upper percentages of the data:
+    trim M by 30% and a by 5%.
+  get weighted mean of M after trimming and calculate normalisation factor.
+  Robinson et al., 2010.: https://pubmed.ncbi.nlm.nih.gov/19910308/
+
+```{r}
+# puts normalisation factors in x$samples$norm.factors
+x <- calcNormFactors(x.no_low_expr, method = "TMM")
+x$samples$norm.factors
+```
+
+The effects of normalisation are a bit small, so visualizing will be difficult.
+So we cheat and andjust the counts in the first sample to 5% of original value, and the second sample 5x larger.
+
+```{r}
+x2 <- x
+x2$samples$norm.factors <- 1
+x2$counts[,1] <- ceiling(x2$counts[,1]*0.05)
+x2$counts[,2] <- x2$counts[,2]*5
+```
+
+
+```{r}
+lcpm_unnormalised <- cpm(x2, log=TRUE)
+lcpm_normalised <- cpm(calcNormFactors(x2), log=TRUE)
+```
+
+ggplot doesn't allow this format.
+```{r}
+lcpm_unnorm_long <- lcpm_unnormalised %>% 
+  as.data.frame() %>%
+  pivot_longer(
+    everything(), 
+    names_to = "sample", 
+    values_to = "cpm" )
+
+lcpm_norm_long <- lcpm_normalised %>% 
+  as.data.frame() %>%
+  pivot_longer(
+    everything(), 
+    names_to = "sample", 
+    values_to = "cpm" )
+
+unnorm_plotn <- ggplot(lcpm_unnorm_long, aes(x = sample, y = cpm)) + geom_boxplot(aes(color=sample)) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle("data") + xlab("log-CPM") + ylab("samples")
+
+norm_plotn <- ggplot(lcpm_norm_long, aes(x = sample, y = cpm)) + geom_boxplot(aes(color=sample)) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle("normalized data") + xlab("log-CPM") + ylab("samples")
+
+unnorm_plotn + norm_plotn
+```
+
+# Unsupervised clustering of samples
+
+"In our opinion, one of the most important exploratory plots to examine for gene expression analyses is the multi-dimensional scaling (MDS) plot, or similar."
+
+wat we see from the plots is that the basal samples group great together.
+Howerver LP and ML group togerther int the first dimension at -2 logFC.
+In the second dimesion there is distiction between the groups, although ML and LP on't cluster that well.
+LP is at 1 logFC in dim1 and ML at -2 logFC in dim1.
+
+what does that mean?
+I guess that it means that the stemmcels behave diffently from the proginator and kuminal cells. that makes sence.
+
+So there are distingc diffenrce between sample groups, that is good. but ML and LP share charistics in the first dimension.
+
+what does that mean?
+The proginator cells and the luminal cells are (al lot) less different compared to the difference between the basal slemm cells and the rest. makes sence.
+
+in the sequencing lanes plot, the samples are all over the place.
+
+what does that mean?
+I guess that's good. because the lanes should not have an effect on the experiment. this means the sequencing run was a success?
+
+```{r}
+lcpm <- cpm(x, log=TRUE)
+par(mfrow=c(1,2))
+col.group <- group
+levels(col.group) <-  brewer.pal(nlevels(col.group), "Set1")
+col.group <- as.character(col.group)
+col.lane <- lane
+levels(col.lane) <-  brewer.pal(nlevels(col.lane), "Set2")
+col.lane <- as.character(col.lane)
+plotMDS(lcpm, labels=group, col=col.group)
+title(main="A. Sample groups")
+```
+
+
+```{r}
+plotMDS(lcpm, labels=lane, col=col.lane, dim=c(3,4))
+title(main="B. Sequencing lanes")
+```
+
+The following code gives a way nicer, interactive plot. The graph can be accessed via the html file in the glimma-plots folder in your project.
+
+```{r}
+glMDSPlot(lcpm, labels=paste(group, lane, sep="_"), groups=x$samples[,c(2,5)],
+         launch=FALSE)
+```
+
+
+The first dimension represent the leading fold change, here ML and LP cluster together and basal is seen as a different group.
+ML and LP have a -2 logFC and basal 4 logFC. beacuse it is a log2, so 2^6 = 64 times difference in expression.
+The first dimension also explains ~70%, followed by 2nd: ~10%, and 3rd and 4th less than 5%.
+So we expect the see the biggest difference between:
+1) basal and LP
+2) basal and ML
+the next strongest (although weaker) difference is between ML and LP. 
+the samples cluster by group, so we should see a steady difference between groups, and not much between samples in the group.
+Does this make sense? 
+
+In the second plot, the lanes kinda cluster together, but not much. I think that's good, so we can neglect the differences between lanes?
+
+# Differential expression analysis
+
+## Creating a design matrix and contrasts
+
+This is basically a binary way to tell the difference between groups and lanes.
+Easy peasy, but there is a funny thing.
+A true for groups tells from what sample it comes, so 3 bits for representation, with a 1 telling which group.
+but for the lanes we do something different! There are 3 lanes, in which:
+00 = lane 4
+01 = lane 8
+10 = lane 6
+
+```{r}
+group
+```
+
+```{r}
+lane
+```
+
+```{r}
+model.matrix(~0+group+lane) # the ~0 is (probably) used to transform the categories to boolean
+```
+we can create better column names by removing the word group.
+```{r}
+design <- model.matrix(~0+group+lane)
+colnames(design) <- gsub("group", "", colnames(design))
+design
+```
+Every line just indicates the attributes of every sample.
+You're just telling the model what the difference is between samples.
+The 1 and 0 act as a mask (multiply by 0 removes values).
+
+It's funny, i used to not grasp this concept that well.
+But after coding a lot and and having worked at BaseClear (micro org sequencing company) I don't find this difficult.
+
+```{r}
+contr.matrix <- makeContrasts(
+   BasalvsLP = Basal - LP,
+   BasalvsML = Basal - ML, 
+   LPvsML = LP - ML,
+   levels = colnames(design))
+contr.matrix
+```
+
+Here we made the contrast matrix.
+wait, does this represent (new-old)/old?
+
+If basal has a higher fold change than lp, then basalvslp is positive.
+if lp has a higher fold change, basalvslp is negative.
+oooh, so -1 or 1 indicates which group has the higher fold change.
+I thing i get it, the model gives a differnce between groups, but doesn't care about if the difference is a net plus or a net min for the involved groups.
+the contrast matrix pts this info back into the model reuslts. (my guess)
+I got it: https://bookdown.org/pingapang9/linear_models_bookdown/contrasts.html
+The model is just a function (y=ax+B) that will explain the data. 
+the contrast matrix makes sure that the slope is displayed correctly for every comparison.
+
+The linear modeling of limma can take experimental complexity into account (multiple samples per group, different lanes) by using the design matrix, like i expected.
+
+## Removing heteroscedascity from count data
+
+"It has been shown that for RNA-seq count data, the variance is not independent of the mean"
+in other words: if the average goes higher, it does not mean that al data points move according to the change.
+back to biology: a count is kinda like 1 RNA molecule for a gene that exists. 
+So (after correcting for library size) if 1 gene produces more RNA, not every gene produces more RNA in the same ratio.
+So i guess there is a finite amount of RNA-polymerase and not every gene in the DNA is producing RNA.
+That makes some sense, although the cell can just make more RNA-polymerase?
+whatever, i'm thinking too much.
+
+"In limma, linear modelling is carried out on the log-CPM values which are assumed to be normally distributed and the mean-variance relationship is accommodated using precision weights calculated by the voom function."
+So the data is not normaly distributed?
+Is that because of the previous info? 
+It's not as if 1 gene produces more RNA, every gene produces more RNA.
+Some are more active than others.
+Or even more precise: some pathways are more active than others.
+So you will see a peak at pathways specific genes, not all genes.
+
+wait: if the data is not normaly distributed, and you need normalised data for the linear model, then why the fuck are we using a nlinear model in the first place??!?!?!?
+I know it is for simplicity's sake, but this feels wrong.
+maybe i'm wrong somewhere.
+
+
+"Experiments with high biological variation usually result in flatter trends, where variance values plateau at high expression values. Experiments with low biological variation tend to result in sharp decreasing trends."
+
+"Where sample-level variation is evident from earlier inspections of the MDS plot, the voomWithQualityWeights function can be used to simultaneously incorporate sample-level weights together with the abundance dependent weights estimated by voom"
+
+```{r}
+v <- voom(x, design, plot=TRUE)
+v
+```
+## Fitting linear models for comparisons of interest
+
+```{r}
+vfit <- lmFit(v, design)
+vfit <- contrasts.fit(vfit, contrasts=contr.matrix)
+efit <- eBayes(vfit)
+plotSA(efit)
+```
+
+## Examining the number of DE genes
+
+Le's check the amount of up and down regulated genes. default p-value cutodd is at 5%.
+this one uses ebayes.
+
+```{r}
+summary(decideTests(efit))
+```
+
+"LP and ML (luminal and luminal proginator) are indeed more the same, as expected from me MDS plot."
+"The treat method can be used to calculate p-values from empirical Bayes moderated t-statistics with a minimum log-FC requirement."
+
+LPvsML isn't that much different from the MDS plot.
+
+
+
+
+
+```{r}
+tfit <- treat(vfit, lfc=1)
+dt <- decideTests(tfit)
+summary(dt)
+```
+
+This looks more in line with the MDS plot, as in: not much difference between proginator an luminal cells compared to the basal stemcells.
+
+let's look at the raw data:
+1 = upregulated, 0 is no significant difference, -1 is downregulated.
+
+```{r}
+dt
+```
+
+```{r}
+de.common <- which(dt[,1]!=0 & dt[,2]!=0)
+length(de.common)
+```
+
+The first 20 of the differential expressed genes.
+```{r}
+head(tfit$genes$SYMBOL[de.common], n=20)
+```
+
+```{r}
+dt[,1:2]
+```
+
+Venn diagram of up and down regulated genes. no difference is nated as a number outside the venn diagram.
+results are written to file.
+```{r}
+vennDiagram(dt[,1:2], circle.col=c("turquoise", "salmon"))
+write.fit(tfit, dt, file="results.txt")
+```
+
+## Examining individual DE genes from top to bottom
+
+
+```{r}
+basal.vs.lp <- topTreat(tfit, coef=1, n=Inf, )
+basal.vs.ml <- topTreat(tfit, coef=2, n=Inf)
+head(basal.vs.lp)
+```
+```{r}
+head(basal.vs.ml)
+```
+
+## Useful graphical representations of differential expression results
+
+
+press ctrl+alt+i for new code cell
+
+```{r}
+plotMD(tfit, column=1, status=dt[,1], main=colnames(tfit)[1], xlim=c(-8,13))
+```
+We can make a nicer graphic with glimma:
+
+```{r}
+glMDPlot(tfit, coef=1, status=dt, main=colnames(tfit)[1],
+         side.main="ENTREZID", counts=lcpm, groups=group, launch=FALSE)
+```
+
+The plot can be found at glimma-plots/MD-Plot.html.
+
+"Heatmaps allow users to look at the expression of a subset of genes. "
+
+The heatmap is for the top 100 DE genes (ranked by adjusted p-value) from basal versus LP.
+
+```{r}
+library(gplots)
+basal.vs.lp.topgenes <- basal.vs.lp$ENTREZID[1:100]
+i <- which(v$genes$ENTREZID %in% basal.vs.lp.topgenes)
+mycol <- colorpanel(1000,"blue","white","red")
+```
+
+```{r}
+
+pl <- heatmap.2(lcpm[i,], 
+                scale="row",
+                labRow=v$genes$SYMBOL[i],
+                labCol=group,
+                col=mycol, 
+                trace="none", 
+                density.info="none", 
+                margin=c(8,6), 
+                lhei=c(2,10), 
+                dendrogram="column")
+# ggsave("heatmap.png", plot=pl, width=8, height=15, dpi=300) does not work...
+```
+It would be better to just create a file so all genes can be shown.
+
+# Gene set testing with camera
+
+```{r}
+load(url("http://bioinf.wehi.edu.au/software/MSigDB/mouse_c2_v5p1.rdata")) 
+idx <- ids2indices(Mm.c2,id=rownames(v)) 
+
+cam.BasalvsLP <- camera(v,idx,design,contrast=contr.matrix[,1]) 
+head(cam.BasalvsLP,5)
+```
+
+```{r}
+cam.BasalvsML <- camera(v,idx,design,contrast=contr.matrix[,2]) 
+head(cam.BasalvsML,5)
+```
+```{r}
+cam.LPvsML <- camera(v,idx,design,contrast=contr.matrix[,3]) 
+head(cam.LPvsML,5)
+```
+
+```{r}
+barcodeplot(efit$t[,3], index=idx$LIM_MAMMARY_LUMINAL_MATURE_UP, 
+            index2=idx$LIM_MAMMARY_LUMINAL_MATURE_DN, main="LPvsML")
+```
+red bars = LIM_MAMMARY_LUMINAL_MATURE_UP
+blue bars = LIM_MAMMARY_LUMINAL_MATURE_DN
+
+"For each set, an enrichment line that shows the relative enrichment of the vertical bars in each part of the plot is displayed."
+
+"In other words, camera is more appropriate when “fishing” for gene sets of interest, whereas mroast tests sets that are already of interest for significance."
+
+
+The graph is 180* mirrord, (inverse correlation) is the result of the way the contrasts has been set up.
+
+
+
+>>>> I'm tired, so brain is not working well. what conclusion cani take from this graph? What do the labels even represent?
+["Barcode plots are often used in conjunction with gene set tests, and show the enrichment of gene sets amongst high or low ranked genes."](https://rdrr.io/bioc/limma/man/barcodeplot.html)
+
+[video explenation](https://www.youtube.com/watch?v=Yi4d7JIlAsM) << watch
+
+this GSEA plot is not like a regular plot. Is it an GSEA plot?
+The R docs say it an Barcode Enrichment Plot.
+[I found a nice website which explains a lot of bio statistics](https://biostatsquid.com/pathway-enrichment-analysis-plots/)
+```{r}
+sessionInfo()
+```
+
+https://f1000research.com/articles/5-1408/v3#f1

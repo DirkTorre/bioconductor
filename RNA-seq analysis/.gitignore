@@ -3,3 +3,5 @@
 .RData
 .Ruserdata
 data/
+glimma-plots/css/
+glimma-plots/js/
